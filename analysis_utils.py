@@ -1,3 +1,4 @@
+import streamlit as st  # Added import for Streamlit
 import pandas as pd
 import numpy as np
 import plotly.express as px
