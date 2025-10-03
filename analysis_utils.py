@@ -6,13 +6,17 @@ import plotly.graph_objects as go
 from typing import List, Dict, Any
 from scipy import stats
 from sklearn.decomposition import IncrementalPCA
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import StandardScaler, MinMaxScaler, LabelEncoder
 from sklearn.cluster import KMeans
-from sklearn.linear_model import LinearRegression
-from sklearn.ensemble import IsolationForest
+from sklearn.linear_model import LinearRegression, LogisticRegression
+from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor, IsolationForest
+from sklearn.metrics import classification_report, mean_squared_error
+from statsmodels.tsa.arima.model import ARIMA
 import statsmodels.tsa.seasonal as smt
 import statsmodels.tsa.stattools as ts
 import io
+import ydata_profiling
+from datetime import datetime
 
 # Custom Exception
 class DataAnalysisError(Exception):
@@ -31,7 +35,6 @@ def validate_data(df: pd.DataFrame, selected_columns: List[str], min_rows: int) 
     if len(df_selected) < min_rows:
         raise DataAnalysisError(f"Insufficient valid data: {len(df_selected)} rows (need ≥{min_rows})")
     
-    # Check for non-numeric data
     if not all(df_selected.dtypes.apply(lambda x: np.issubdtype(x, np.number))):
         raise DataAnalysisError("Selected columns must contain numeric data only.")
     
@@ -41,29 +44,25 @@ def validate_data(df: pd.DataFrame, selected_columns: List[str], min_rows: int) 
 def load_and_preprocess_data(uploaded_files, n_rows=None) -> pd.DataFrame:
     """Load numeric Excel data or generate sample, preserving small values."""
     if not uploaded_files:
-        # Generate sample data
         rng = np.random.default_rng(42)
         df = pd.DataFrame({
             'Feature1': rng.normal(1.2, 0.05, 100),
             'Feature2': rng.normal(500, 50, 100),
-            'Feature3': rng.normal(30, 2, 100) * 1e-16,  # Include small values
+            'Feature3': rng.normal(30, 2, 100) * 1e-16,
             'Time': np.arange(100),
             'Target': 2 * rng.normal(1.2, 0.05, 100) + np.sin(rng.normal(30, 2, 100)),
-            'Category': rng.choice(['A', 'B', 'C'], 100)  # For group-based analysis
+            'Category': rng.choice(['A', 'B', 'C'], 100)
         })
         return df
 
     dfs = []
     for uploaded_file in uploaded_files:
         uploaded_file.seek(0)
-        # Use float64 to preserve small numbers
         df_temp = pd.read_excel(io.BytesIO(uploaded_file.read()), engine='openpyxl', dtype_backend='numpy_nullable')
         numeric_cols = df_temp.select_dtypes(include=[np.number]).columns.tolist()
-        # Preserve categorical columns for group-based analysis
         categorical_cols = df_temp.select_dtypes(include=['object', 'category']).columns.tolist()
         if numeric_cols:
             df_temp = df_temp[numeric_cols + categorical_cols].copy()
-            # Impute missing numeric values with median
             df_temp[numeric_cols] = df_temp[numeric_cols].fillna(df_temp[numeric_cols].median())
             if n_rows:
                 df_temp = df_temp.sample(n=min(n_rows, len(df_temp)), random_state=42)
@@ -71,11 +70,92 @@ def load_and_preprocess_data(uploaded_files, n_rows=None) -> pd.DataFrame:
 
     if dfs:
         df = pd.concat(dfs, ignore_index=True)
-        # Convert numeric columns to float64 to avoid precision loss
         for col in numeric_cols:
             df[col] = df[col].astype(np.float64)
         return df
     raise DataAnalysisError("No numeric data found in uploaded files.")
+
+# Data Cleaning Suggestions
+def suggest_data_cleaning(df: pd.DataFrame, numeric_cols: List[str], categorical_cols: List[str]) -> List[str]:
+    """Generate data cleaning suggestions."""
+    suggestions = []
+    
+    # Missing Values
+    missing = df.isna().sum()
+    for col in df.columns:
+        if missing[col] > 0:
+            percent_missing = (missing[col] / len(df)) * 100
+            if col in numeric_cols:
+                suggestions.append(f"Missing values in {col} ({percent_missing:.1f}%): Impute with median.")
+            elif col in categorical_cols:
+                suggestions.append(f"Missing values in {col} ({percent_missing:.1f}%): Impute with mode or drop.")
+
+    # Outliers
+    for col in numeric_cols:
+        Q1 = df[col].quantile(0.25)
+        Q3 = df[col].quantile(0.75)
+        IQR = Q3 - Q1
+        outliers = df[(df[col] < (Q1 - 1.5 * IQR)) | (df[col] > (Q3 + 1.5 * IQR))][col]
+        if not outliers.empty:
+            suggestions.append(f"Outliers in {col}: Consider capping or removing.")
+
+    # Categorical Encoding
+    for col in categorical_cols:
+        unique_vals = df[col].nunique()
+        if unique_vals > 10:
+            suggestions.append(f"High cardinality in {col} ({unique_vals} unique values): Consider grouping or encoding.")
+        else:
+            suggestions.append(f"Categorical column {col}: Encode with LabelEncoder.")
+
+    return suggestions
+
+# Apply Data Cleaning
+def apply_data_cleaning(df: pd.DataFrame, suggestions: List[str]) -> pd.DataFrame:
+    """Apply suggested data cleaning steps."""
+    df_clean = df.copy()
+    for suggestion in suggestions:
+        if "Missing values" in suggestion:
+            col = suggestion.split(" in ")[1].split(" (")[0]
+            if "Impute with median" in suggestion:
+                df_clean[col].fillna(df_clean[col].median(), inplace=True)
+            elif "Impute with mode" in suggestion:
+                df_clean[col].fillna(df_clean[col].mode()[0], inplace=True)
+        elif "Outliers in" in suggestion:
+            col = suggestion.split(" in ")[1].split(":")[0]
+            Q1 = df_clean[col].quantile(0.25)
+            Q3 = df_clean[col].quantile(0.75)
+            IQR = Q3 - Q1
+            lower_bound = Q1 - 1.5 * IQR
+            upper_bound = Q3 + 1.5 * IQR
+            df_clean[col] = df_clean[col].clip(lower=lower_bound, upper=upper_bound)
+        elif "Encode with LabelEncoder" in suggestion:
+            col = suggestion.split("column ")[1].split(":")[0]
+            le = LabelEncoder()
+            df_clean[col] = le.fit_transform(df_clean[col].astype(str))
+    return df_clean
+
+# Data Transformations
+def apply_transformations(df: pd.DataFrame, columns: List[str], transformation: str) -> pd.DataFrame:
+    """Apply transformations to numeric columns."""
+    df_transformed = df.copy()
+    if transformation == "Log":
+        for col in columns:
+            df_transformed[col] = np.log1p(df_transformed[col].clip(lower=0))
+    elif transformation == "StandardScaler":
+        scaler = StandardScaler()
+        df_transformed[columns] = scaler.fit_transform(df_transformed[columns])
+    elif transformation == "MinMaxScaler":
+        scaler = MinMaxScaler()
+        df_transformed[columns] = scaler.fit_transform(df_transformed[columns])
+    return df_transformed
+
+# Format DataFrame for Display
+def format_dataframe_for_display(df: pd.DataFrame, precision: int = 6) -> pd.DataFrame:
+    """Format DataFrame to show very small numbers in scientific notation."""
+    return df.apply(
+        lambda x: x.map(lambda v: f"{v:.{precision}e}" if isinstance(v, (float, np.floating)) else v)
+        if x.dtype in [np.float64, np.float32] else x
+    )
 
 # Main Analysis Function
 @st.cache_data
@@ -93,20 +173,19 @@ def analyze_data(
     color_scale: str = "RdBu_r",
     n_clusters: int = 3,
     group_column: str = None,
-    period: int = None
+    period: int = None,
+    ml_model: str = None
 ) -> Dict[str, Any]:
     """Perform specified data analysis, handling small values."""
     results = {}
 
-    # Check for small values
     small_value_threshold = 1e-15
     small_value_cols = [col for col in selected_columns if df[col].abs().max() < small_value_threshold and df[col].abs().max() > 0]
     if small_value_cols:
         results['small_value_warning'] = f"Columns with very small values (< {small_value_threshold}): {', '.join(small_value_cols)}"
 
     if analysis_type == "summary":
-        # Summary statistics with high precision
-        pd.options.display.float_format = '{:.16e}'.format  # Preserve small numbers in display
+        pd.options.display.float_format = '{:.16e}'.format
         summary = df[selected_columns].describe().T
         summary['range'] = summary['max'] - summary['min']
         summary['variance'] = df[selected_columns].var()
@@ -117,7 +196,6 @@ def analyze_data(
         summary['kurtosis'] = df[selected_columns].kurtosis()
         results['summary'] = summary
 
-        # Variance plot
         results['variance_plot'] = px.bar(
             x=selected_columns,
             y=[df[col].var() for col in selected_columns],
@@ -126,19 +204,17 @@ def analyze_data(
             color_discrete_sequence=[px.colors.sequential.__dict__[color_scale][0]]
         )
 
-        # Data quality checks, adjusted for small values
         quality_checks = []
         for col in selected_columns:
             if summary.loc[col, 'missing_%'] > 30:
                 quality_checks.append(f"{col}: High missing values ({summary.loc[col, 'missing_%']:.1f}%)")
-            if summary.loc[col, 'variance'] < 1e-30:  # Lower threshold for small values
+            if summary.loc[col, 'variance'] < 1e-30:
                 quality_checks.append(f"{col}: Extremely low variance ({summary.loc[col, 'variance']:.2e})")
             if summary.loc[col, 'skewness'] > 1 or summary.loc[col, 'skewness'] < -1:
                 quality_checks.append(f"{col}: High skewness ({summary.loc[col, 'skewness']:.2f})")
         results['quality_checks'] = quality_checks
 
     elif analysis_type == "correlation":
-        # Correlation analysis
         corr_matrix = df[selected_columns].corr(method=correlation_method)
         high_corrs = []
         if len(selected_columns) > 1:
@@ -150,7 +226,6 @@ def analyze_data(
         results['correlation'] = corr_matrix
         results['high_correlations'] = high_corrs
 
-        # Heatmap
         results['corr_heatmap'] = px.imshow(
             corr_matrix,
             text_auto=".2f",
@@ -159,7 +234,6 @@ def analyze_data(
             title="Correlation Heatmap"
         )
 
-        # Scatter corrlogram
         if len(selected_columns) > 1:
             corr_pairs = []
             for i in range(len(selected_columns)):
@@ -183,7 +257,6 @@ def analyze_data(
             )
 
     elif analysis_type == "distribution":
-        # Distribution histograms
         histograms = {}
         for col in selected_columns:
             if histogram_type == "frequency":
@@ -193,7 +266,6 @@ def analyze_data(
             elif histogram_type == "cumulative":
                 fig = px.histogram(df, x=col, nbins=num_bins, cumulative=True, title=f"Cumulative Distribution of {col}", color_discrete_sequence=[px.colors.sequential.__dict__[color_scale][0]])
 
-            # Add KDE curve
             if histogram_type in ["frequency", "density"]:
                 kde_x = np.linspace(df[col].min(), df[col].max(), 100)
                 kde = stats.gaussian_kde(df[col].dropna())
@@ -212,18 +284,15 @@ def analyze_data(
         results['histograms'] = histograms
 
     elif analysis_type == "boxplot":
-        # Box plots
         results['boxplot'] = px.box(df[selected_columns], title="Box Plots for Selected Columns", color_discrete_sequence=[px.colors.sequential.__dict__[color_scale][0]])
 
     elif analysis_type == "scatter":
-        # Scatter matrix
         if len(selected_columns) > 1:
             results['scatter'] = px.scatter_matrix(df[selected_columns], title="Scatter Matrix", color_continuous_scale=color_scale)
         else:
             raise DataAnalysisError("Scatter analysis requires at least two columns.")
 
     elif analysis_type == "outliers":
-        # Outlier detection
         outliers = {}
         for col in selected_columns:
             Q1 = df[col].quantile(0.25)
@@ -234,7 +303,6 @@ def analyze_data(
         results['outliers'] = outliers
 
     elif analysis_type == "feature_importance" and target_column:
-        # Feature importance
         importance = []
         target_data = df[target_column].copy()
         for col in selected_columns:
@@ -252,7 +320,6 @@ def analyze_data(
         )
 
     elif analysis_type == "normality":
-        # Normality testing
         normality_results = []
         for col in selected_columns:
             data = df[col].dropna()
@@ -274,7 +341,6 @@ def analyze_data(
         results['normality'] = pd.DataFrame(normality_results)
 
     elif analysis_type == "pca":
-        # PCA with IncrementalPCA
         scaler = StandardScaler()
         X_scaled = scaler.fit_transform(df[selected_columns].dropna())
         pca = IncrementalPCA(n_components=min(len(selected_columns), len(X_scaled)))
@@ -303,7 +369,6 @@ def analyze_data(
             )
 
     elif analysis_type == "variogram" and lag_column:
-        # Semivariogram
         variograms = {}
         for col in selected_columns:
             if col != lag_column:
@@ -343,7 +408,6 @@ def analyze_data(
         results['variograms'] = variograms
 
     elif analysis_type == "autocorrelation" and lag_column:
-        # Autocorrelation
         autocorrs = {}
         for col in selected_columns:
             if col != lag_column:
@@ -363,21 +427,17 @@ def analyze_data(
         results['autocorrelations'] = autocorrs
 
     elif analysis_type == "clustering":
-        # K-means clustering
         scaler = StandardScaler()
         X_scaled = scaler.fit_transform(df[selected_columns].dropna())
         kmeans = KMeans(n_clusters=n_clusters, random_state=42)
         clusters = kmeans.fit_predict(X_scaled)
         
-        # Add cluster labels to dataframe
         cluster_df = df[selected_columns].dropna().copy()
         cluster_df['Cluster'] = clusters
         
-        # Cluster summary
         cluster_summary = cluster_df.groupby('Cluster').mean()
         results['cluster_summary'] = cluster_summary
         
-        # 2D scatter plot (if possible)
         if len(selected_columns) >= 2:
             results['cluster_plot'] = px.scatter(
                 cluster_df,
@@ -397,47 +457,56 @@ def analyze_data(
                 color_continuous_scale=color_scale
             )
 
-    elif analysis_type == "regression" and target_column:
-        # Linear regression
+    elif analysis_type == "ml_pipeline" and target_column:
         X = df[[col for col in selected_columns if col != target_column]].dropna()
         y = df[target_column].dropna()
         if len(X) != len(y):
             raise DataAnalysisError("Mismatch between features and target data after removing NaNs.")
         
-        model = LinearRegression()
-        model.fit(X, y)
-        y_pred = model.predict(X)
+        # Determine if classification or regression
+        is_classification = df[target_column].dtype in ['object', 'category'] or df[target_column].nunique() < 10
+        if is_classification:
+            y = LabelEncoder().fit_transform(y)
+            if ml_model == "Linear Regression":
+                raise DataAnalysisError("Linear Regression not suitable for classification.")
+            model = LogisticRegression() if ml_model == "Logistic Regression" else RandomForestClassifier(random_state=42)
+            metrics = classification_report(y, model.fit(X, y).predict(X), output_dict=True)
+            results['ml_score'] = metrics['weighted avg']['f1-score']
+            results['ml_metrics'] = pd.DataFrame(metrics).T
+        else:
+            model = LinearRegression() if ml_model == "Linear Regression" else RandomForestRegressor(random_state=42)
+            model.fit(X, y)
+            y_pred = model.predict(X)
+            results['ml_score'] = model.score(X, y)
+            results['ml_metrics'] = pd.DataFrame({
+                'Metric': ['R²', 'MSE'],
+                'Value': [results['ml_score'], mean_squared_error(y, y_pred)]
+            })
         
-        # R² score
-        r2_score = model.score(X, y)
-        results['r2_score'] = r2_score
+        if ml_model == "Random Forest":
+            results['feature_importance'] = pd.DataFrame({
+                'Feature': X.columns,
+                'Importance': model.feature_importances_
+            }).sort_values(by='Importance', ascending=False)
         
-        # Coefficients
-        coef_df = pd.DataFrame({
-            'Feature': X.columns,
-            'Coefficient': model.coef_
-        })
-        results['coefficients'] = coef_df
-        
-        # Regression plot (for first feature vs target)
         if len(X.columns) >= 1:
-            results['regression_plot'] = px.scatter(
+            results['ml_plot'] = px.scatter(
                 x=X.iloc[:, 0], y=y,
-                title=f"Regression: {target_column} vs {X.columns[0]}",
+                title=f"{ml_model}: {target_column} vs {X.columns[0]}",
                 labels={'x': X.columns[0], 'y': target_column},
                 color_continuous_scale=color_scale
             )
-            results['regression_plot'].add_trace(
-                go.Scatter(x=X.iloc[:, 0], y=y_pred, mode='lines', name='Fit', line=dict(color='red'))
-            )
+            if not is_classification:
+                results['ml_plot'].add_trace(
+                    go.Scatter(x=X.iloc[:, 0], y=y_pred, mode='lines', name='Fit', line=dict(color='red'))
+                )
 
     elif analysis_type == "timeseries_decomposition" and lag_column:
-        # Time-series decomposition
         decompositions = {}
         for col in selected_columns:
             if col != lag_column:
                 data = df[[col, lag_column]].dropna().sort_values(by=lag_column)[col]
-                if len(data) >= period * 2:  # Need enough data for decomposition
+                if len(data) >= period * 2:
                     decomposition = smt.DecomposeResult(
                         observed=data,
                         trend=smt.STL(data, period=period).fit().trend,
@@ -456,16 +525,14 @@ def analyze_data(
         results['decompositions'] = decompositions
 
     elif analysis_type == "anomaly_detection":
-        # Anomaly detection with Isolation Forest
         scaler = StandardScaler()
         X_scaled = scaler.fit_transform(df[selected_columns].dropna())
         iso_forest = IsolationForest(contamination=0.1, random_state=42)
         anomalies = iso_forest.fit_predict(X_scaled)
         anomaly_df = df[selected_columns].dropna().copy()
-        anomaly_df['Anomaly'] = anomalies == -1  # -1 indicates anomaly
+        anomaly_df['Anomaly'] = anomalies == -1
         results['anomaly_df'] = anomaly_df[anomaly_df['Anomaly']][selected_columns]
         
-        # Anomaly scatter plot (if possible)
         if len(selected_columns) >= 2:
             results['anomaly_plot'] = px.scatter(
                 anomaly_df,
@@ -486,11 +553,9 @@ def analyze_data(
             )
 
     elif analysis_type == "group_stats" and group_column:
-        # Descriptive statistics by group
         group_stats = df.groupby(group_column)[selected_columns].agg(['mean', 'std', 'min', 'max']).reset_index()
         results['group_stats'] = group_stats
         
-        # Bar plot for group means
         if len(selected_columns) >= 1:
             results['group_plot'] = px.bar(
                 group_stats,
@@ -499,6 +564,33 @@ def analyze_data(
                 title=f"Mean of {selected_columns[0]} by {group_column}",
                 color_discrete_sequence=[px.colors.sequential.__dict__[color_scale][0]]
             )
+
+    elif analysis_type == "eda_report":
+        profile = ydata_profiling.ProfileReport(df, title="Automated EDA Report")
+        eda_file = f"eda_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html"
+        profile.to_file(eda_file)
+        results['eda_report'] = eda_file
+
+    elif analysis_type == "forecasting" and lag_column:
+        forecasts = {}
+        for col in selected_columns:
+            if col != lag_column:
+                data = df[[col, lag_column]].dropna().sort_values(by=lag_column)[col]
+                if len(data) >= 10:
+                    model = ARIMA(data, order=(1, 1, 1)).fit()
+                    forecast = model.forecast(steps=10)
+                    forecast_index = range(int(df[lag_column].max()) + 1, int(df[lag_column].max()) + 11)
+                    fig = go.Figure()
+                    fig.add_trace(go.Scatter(x=df[lag_column], y=data, mode='lines', name='Historical'))
+                    fig.add_trace(go.Scatter(x=forecast_index, y=forecast, mode='lines', name='Forecast', line=dict(color='red')))
+                    fig.update_layout(title=f"ARIMA Forecast for {col}", xaxis_title=lag_column, yaxis_title=col)
+                    forecasts[col] = {
+                        'plot': fig,
+                        'forecast_df': pd.DataFrame({'Time': forecast_index, 'Forecast': forecast})
+                    }
+                else:
+                    forecasts[col] = {'plot': None, 'forecast_df': pd.DataFrame()}
+        results['forecasts'] = forecasts
 
     return results
 
@@ -550,13 +642,19 @@ def generate_report(
         report_text += f"Autocorrelations computed for {', '.join([col for col, fig in analysis_result['autocorrelations'].items() if fig])}"
     elif analysis_type == "clustering":
         report_text += analysis_result['cluster_summary'].to_string()
-    elif analysis_type == "regression":
-        report_text += f"R² Score: {analysis_result['r2_score']:.3f}\nCoefficients:\n{analysis_result['coefficients'].to_string()}"
+    elif analysis_type == "ml_pipeline":
+        report_text += f"Model Score: {analysis_result['ml_score']:.3f}\nMetrics:\n{analysis_result['ml_metrics'].to_string()}"
+        if 'feature_importance' in analysis_result:
+            report_text += f"\nFeature Importance:\n{analysis_result['feature_importance'].to_string()}"
     elif analysis_type == "timeseries_decomposition":
         report_text += f"Decompositions computed for {', '.join([col for col, fig in analysis_result['decompositions'].items() if fig])}"
     elif analysis_type == "anomaly_detection":
         report_text += analysis_result['anomaly_df'].to_string()
     elif analysis_type == "group_stats":
         report_text += analysis_result['group_stats'].to_string()
+    elif analysis_type == "eda_report":
+        report_text += "Automated EDA report generated and saved as HTML."
+    elif analysis_type == "forecasting":
+        report_text += f"Forecasts computed for {', '.join([col for col, forecast in analysis_result['forecasts'].items() if forecast['plot']])}"
 
     return report_text
