@@ -15,10 +15,6 @@ from statsmodels.tsa.arima.model import ARIMA
 import statsmodels.tsa.seasonal as smt
 import statsmodels.tsa.stattools as ts
 import io
-try:
-    from ydata_profiling import ProfileReport
-except ImportError:
-    ProfileReport = None
 from datetime import datetime
 
 # Custom Exception
@@ -159,6 +155,86 @@ def format_dataframe_for_display(df: pd.DataFrame, precision: int = 6) -> pd.Dat
         lambda x: x.map(lambda v: f"{v:.{precision}e}" if isinstance(v, (float, np.floating)) else v)
         if x.dtype in [np.float64, np.float32] else x
     )
+
+# Custom EDA Report Generator
+def generate_custom_eda_report(df: pd.DataFrame, selected_columns: List[str] = None) -> str:
+    """Generate a custom HTML EDA report using pandas and plotly."""
+    if selected_columns is None:
+        selected_columns = df.select_dtypes(include=[np.number]).columns.tolist()
+
+    # Basic info
+    html = f"""
+    <html>
+    <head><title>Custom EDA Report - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</title>
+    <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+    <style>
+        body {{ font-family: Arial; margin: 20px; }}
+        h2 {{ color: #333; }}
+        .section {{ margin-bottom: 30px; }}
+        table {{ border-collapse: collapse; width: 100%; }}
+        th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
+        th {{ background-color: #f2f2f2; }}
+    </style>
+    </head>
+    <body>
+    <h1>Custom Exploratory Data Analysis Report</h1>
+    <p><strong>Dataset Shape:</strong> {df.shape[0]} rows, {df.shape[1]} columns</p>
+    <p><strong>Numeric Columns Analyzed:</strong> {', '.join(selected_columns)}</p>
+
+    <div class="section">
+    <h2>1. Overview & Missing Values</h2>
+    """
+    missing_df = pd.DataFrame({
+        'Column': df.columns,
+        'Missing Count': df.isnull().sum(),
+        'Missing %': (df.isnull().sum() / len(df)) * 100
+    }).round(2)
+    html += f'<p>{missing_df.to_html(index=False, classes="table", escape=False)}</p>'
+
+    # Summary Statistics
+    html += """
+    <h2>2. Summary Statistics (Numeric Columns)</h2>
+    """
+    summary = df[selected_columns].describe().round(4)
+    html += f'<p>{summary.to_html(escape=False, classes="table")}</p>'
+
+    # Correlation Heatmap
+    if len(selected_columns) > 1:
+        corr = df[selected_columns].corr()
+        fig_corr = px.imshow(corr, text_auto=".2f", color_continuous_scale="RdBu_r", title="Correlation Matrix")
+        html += f'<div id="corr_plot" style="width:100%;height:400px;"></div><script>Plotly.newPlot("corr_plot", {fig_corr.to_json().replace("figure", "data")});</script>'
+
+    # Distributions (Histograms for first 3 columns to keep report concise)
+    html += """
+    <h2>3. Distributions</h2>
+    """
+    for i, col in enumerate(selected_columns[:3]):  # Limit to 3 for brevity
+        fig_hist = px.histogram(df, x=col, nbins=30, title=f"Distribution of {col}", marginal="box")
+        html += f'<div id="hist_{i}" style="width:100%;height:300px;"></div><script>Plotly.newPlot("hist_{i}", {fig_hist.to_json().replace("figure", "data")});</script>'
+
+    # Alerts (High missing, low variance, etc.)
+    html += """
+    <h2>4. Alerts & Insights</h2>
+    <ul>
+    """
+    alerts = []
+    for col in selected_columns:
+        if df[col].isnull().mean() > 0.1:
+            alerts.append(f"<li>High missing values in {col}: {df[col].isnull().mean()*100:.1f}%</li>")
+        if df[col].var() < 1e-10:
+            alerts.append(f"<li>Low variance in {col}: {df[col].var():.2e}</li>")
+        if abs(df[col].skew()) > 1:
+            alerts.append(f"<li>Skewed distribution in {col}: skew={df[col].skew():.2f}</li>")
+    if not alerts:
+        alerts.append("<li>No major issues detected!</li>")
+    html += "".join(alerts) + "</ul>"
+
+    html += """
+    </div>
+    </body>
+    </html>
+    """
+    return html
 
 # Main Analysis Function
 @st.cache_data
@@ -570,12 +646,8 @@ def analyze_data(
             )
 
     elif analysis_type == "eda_report":
-        if ProfileReport is None:
-            raise DataAnalysisError("ydata-profiling is not installed. Please install it with `pip install ydata-profiling`.")
-        profile = ProfileReport(df, title="Automated EDA Report")
-        eda_file = f"eda_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html"
-        profile.to_file(eda_file)
-        results['eda_report'] = eda_file
+        eda_html = generate_custom_eda_report(df, selected_columns)
+        results['eda_report'] = eda_html
 
     elif analysis_type == "forecasting" and lag_column:
         forecasts = {}
@@ -662,7 +734,7 @@ def generate_report(
     elif analysis_type == "group_stats":
         report_text += analysis_result['group_stats'].to_string()
     elif analysis_type == "eda_report":
-        report_text += "Automated EDA report generated and saved as HTML."
+        report_text += "Custom EDA report generated and saved as HTML."
     elif analysis_type == "forecasting":
         report_text += f"Forecasts computed for {', '.join([col for col, forecast in analysis_result['forecasts'].items() if forecast['plot']])}"
         for col, forecast in analysis_result['forecasts'].items():
