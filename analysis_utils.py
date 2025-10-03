@@ -15,7 +15,10 @@ from statsmodels.tsa.arima.model import ARIMA
 import statsmodels.tsa.seasonal as smt
 import statsmodels.tsa.stattools as ts
 import io
-import ydata_profiling
+try:
+    from ydata_profiling import ProfileReport
+except ImportError:
+    ProfileReport = None
 from datetime import datetime
 
 # Custom Exception
@@ -470,7 +473,8 @@ def analyze_data(
             if ml_model == "Linear Regression":
                 raise DataAnalysisError("Linear Regression not suitable for classification.")
             model = LogisticRegression() if ml_model == "Logistic Regression" else RandomForestClassifier(random_state=42)
-            metrics = classification_report(y, model.fit(X, y).predict(X), output_dict=True)
+            model.fit(X, y)
+            metrics = classification_report(y, model.predict(X), output_dict=True)
             results['ml_score'] = metrics['weighted avg']['f1-score']
             results['ml_metrics'] = pd.DataFrame(metrics).T
         else:
@@ -566,7 +570,9 @@ def analyze_data(
             )
 
     elif analysis_type == "eda_report":
-        profile = ydata_profiling.ProfileReport(df, title="Automated EDA Report")
+        if ProfileReport is None:
+            raise DataAnalysisError("ydata-profiling is not installed. Please install it with `pip install ydata-profiling`.")
+        profile = ProfileReport(df, title="Automated EDA Report")
         eda_file = f"eda_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html"
         profile.to_file(eda_file)
         results['eda_report'] = eda_file
@@ -577,19 +583,22 @@ def analyze_data(
             if col != lag_column:
                 data = df[[col, lag_column]].dropna().sort_values(by=lag_column)[col]
                 if len(data) >= 10:
-                    model = ARIMA(data, order=(1, 1, 1)).fit()
-                    forecast = model.forecast(steps=10)
-                    forecast_index = range(int(df[lag_column].max()) + 1, int(df[lag_column].max()) + 11)
-                    fig = go.Figure()
-                    fig.add_trace(go.Scatter(x=df[lag_column], y=data, mode='lines', name='Historical'))
-                    fig.add_trace(go.Scatter(x=forecast_index, y=forecast, mode='lines', name='Forecast', line=dict(color='red')))
-                    fig.update_layout(title=f"ARIMA Forecast for {col}", xaxis_title=lag_column, yaxis_title=col)
-                    forecasts[col] = {
-                        'plot': fig,
-                        'forecast_df': pd.DataFrame({'Time': forecast_index, 'Forecast': forecast})
-                    }
+                    try:
+                        model = ARIMA(data, order=(1, 1, 1)).fit()
+                        forecast = model.forecast(steps=10)
+                        forecast_index = range(int(df[lag_column].max()) + 1, int(df[lag_column].max()) + 11)
+                        fig = go.Figure()
+                        fig.add_trace(go.Scatter(x=df[lag_column], y=data, mode='lines', name='Historical'))
+                        fig.add_trace(go.Scatter(x=forecast_index, y=forecast, mode='lines', name='Forecast', line=dict(color='red')))
+                        fig.update_layout(title=f"ARIMA Forecast for {col}", xaxis_title=lag_column, yaxis_title=col)
+                        forecasts[col] = {
+                            'plot': fig,
+                            'forecast_df': pd.DataFrame({'Time': forecast_index, 'Forecast': forecast})
+                        }
+                    except Exception as e:
+                        forecasts[col] = {'plot': None, 'forecast_df': pd.DataFrame(), 'error': str(e)}
                 else:
-                    forecasts[col] = {'plot': None, 'forecast_df': pd.DataFrame()}
+                    forecasts[col] = {'plot': None, 'forecast_df': pd.DataFrame(), 'error': "Insufficient data"}
         results['forecasts'] = forecasts
 
     return results
@@ -656,5 +665,8 @@ def generate_report(
         report_text += "Automated EDA report generated and saved as HTML."
     elif analysis_type == "forecasting":
         report_text += f"Forecasts computed for {', '.join([col for col, forecast in analysis_result['forecasts'].items() if forecast['plot']])}"
+        for col, forecast in analysis_result['forecasts'].items():
+            if 'error' in forecast:
+                report_text += f"\nError in forecasting {col}: {forecast['error']}"
 
     return report_text
