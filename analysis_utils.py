@@ -151,10 +151,13 @@ def apply_transformations(df: pd.DataFrame, columns: List[str], transformation: 
 # Format DataFrame for Display
 def format_dataframe_for_display(df: pd.DataFrame, precision: int = 6) -> pd.DataFrame:
     """Format DataFrame to show very small numbers in scientific notation."""
-    return df.apply(
-        lambda x: x.map(lambda v: f"{v:.{precision}e}" if isinstance(v, (float, np.floating)) else v)
-        if x.dtype in [np.float64, np.float32] else x
-    )
+    def format_value(v):
+        if isinstance(v, (float, np.floating)):
+            if abs(v) < 1e-10 and v != 0:
+                return f"{v:.{precision}e}"
+            return f"{v:.{precision}f}"
+        return v
+    return df.apply(lambda x: x.map(format_value) if x.dtype in [np.float64, np.float32] else x)
 
 # Custom EDA Report Generator
 def generate_custom_eda_report(df: pd.DataFrame, selected_columns: List[str] = None) -> str:
@@ -196,7 +199,7 @@ def generate_custom_eda_report(df: pd.DataFrame, selected_columns: List[str] = N
     <h2>2. Summary Statistics (Numeric Columns)</h2>
     """
     summary = df[selected_columns].describe().round(4)
-    html += f'<p>{summary.to_html(escape=False, classes="table")}</p>'
+    html += f'<p>{format_dataframe_for_display(summary).to_html(escape=False, classes="table")}</p>'
 
     # Correlation Heatmap
     if len(selected_columns) > 1:
