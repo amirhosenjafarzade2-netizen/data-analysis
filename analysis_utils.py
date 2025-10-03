@@ -99,34 +99,28 @@ def analyze_data(
     results = {}
 
     # Check for small values
-    small_value_threshold = 1e-10  # Threshold for scientific notation
+    small_value_threshold = 1e-15
     small_value_cols = [col for col in selected_columns if df[col].abs().max() < small_value_threshold and df[col].abs().max() > 0]
     if small_value_cols:
         results['small_value_warning'] = f"Columns with very small values (< {small_value_threshold}): {', '.join(small_value_cols)}"
 
     if analysis_type == "summary":
         # Summary statistics with high precision
-        summary = df.describe()
-        summary.loc['range'] = summary.loc['max'] - summary.loc['min']
-        summary.loc['variance'] = df.var()
-        summary.loc['median'] = df.median()
-        summary.loc['mode'] = df.mode().iloc[0] if not df.mode().empty else np.nan
-        summary.loc['missing_%'] = df.isnull().mean() * 100
-        summary.loc['skewness'] = df.skew()
-        summary.loc['kurtosis'] = df.kurtosis()
-
-        # Formatter per column
-        formatter = {col: '{:.4e}' if df[col].abs().max() < small_value_threshold else '{:.4f}' for col in selected_columns}
-        styled_summary = summary.style.format(formatter, na_rep='N/A')
-        results['styled_summary'] = styled_summary
-
-        # Raw summary for report and checks
-        results['raw_summary'] = summary
+        pd.options.display.float_format = '{:.16e}'.format  # Preserve small numbers in display
+        summary = df[selected_columns].describe().T
+        summary['range'] = summary['max'] - summary['min']
+        summary['variance'] = df[selected_columns].var()
+        summary['median'] = df[selected_columns].median()
+        summary['mode'] = df[selected_columns].mode().iloc[0] if not df[selected_columns].mode().empty else np.nan
+        summary['missing_%'] = df[selected_columns].isnull().mean() * 100
+        summary['skewness'] = df[selected_columns].skew()
+        summary['kurtosis'] = df[selected_columns].kurtosis()
+        results['summary'] = summary
 
         # Variance plot
         results['variance_plot'] = px.bar(
             x=selected_columns,
-            y=summary.loc['variance'],
+            y=[df[col].var() for col in selected_columns],
             title="Variance of Selected Columns",
             labels={'x': 'Column', 'y': 'Variance'},
             color_discrete_sequence=[px.colors.sequential.__dict__[color_scale][0]]
@@ -135,12 +129,12 @@ def analyze_data(
         # Data quality checks, adjusted for small values
         quality_checks = []
         for col in selected_columns:
-            if summary.loc['missing_%', col] > 30:
-                quality_checks.append(f"{col}: High missing values ({summary.loc['missing_%', col]:.1f}%)")
-            if summary.loc['variance', col] < 1e-30:  # Lower threshold for small values
-                quality_checks.append(f"{col}: Extremely low variance ({summary.loc['variance', col]:.2e})")
-            if summary.loc['skewness', col] > 1 or summary.loc['skewness', col] < -1:
-                quality_checks.append(f"{col}: High skewness ({summary.loc['skewness', col]:.2f})")
+            if summary.loc[col, 'missing_%'] > 30:
+                quality_checks.append(f"{col}: High missing values ({summary.loc[col, 'missing_%']:.1f}%)")
+            if summary.loc[col, 'variance'] < 1e-30:  # Lower threshold for small values
+                quality_checks.append(f"{col}: Extremely low variance ({summary.loc[col, 'variance']:.2e})")
+            if summary.loc[col, 'skewness'] > 1 or summary.loc[col, 'skewness'] < -1:
+                quality_checks.append(f"{col}: High skewness ({summary.loc[col, 'skewness']:.2f})")
         results['quality_checks'] = quality_checks
 
     elif analysis_type == "correlation":
@@ -534,8 +528,7 @@ def generate_report(
         report_text += f"\n**Warning**: {analysis_result['small_value_warning']}\n"
     
     if analysis_type == "summary":
-        # Use raw summary with float_format for small values
-        report_text += analysis_result['raw_summary'].to_string(float_format=lambda x: f"{x:.4e}" if abs(x) < 1e-10 else f"{x:.4f}")
+        report_text += analysis_result['summary'].to_string()
         if analysis_result['quality_checks']:
             report_text += "\n\n**Data Quality Issues**:\n" + "\n".join(analysis_result['quality_checks'])
     elif analysis_type == "correlation":
