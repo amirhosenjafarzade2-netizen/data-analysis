@@ -20,7 +20,7 @@ with st.sidebar.expander("ℹ️ User Guide"):
     st.markdown("""
     ### Welcome to the Advanced Data Analysis App
     Upload Excel files (`.xlsx`, `.xls`) to analyze numeric data. Features include:
-    - **Summary Statistics**: Mean, median, variance, skewness, kurtosis, etc. (small values shown in scientific notation, e.g., 1.234e-16).
+    - **Summary Statistics**: Mean, median, variance, skewness, kurtosis, etc. (small values shown in scientific notation, e.g., 1.23e-16).
     - **Correlation Analysis**: Heatmap and scatter corrlogram (Pearson, Spearman, Kendall).
     - **Distribution Analysis**: Histograms (frequency, density, cumulative) with KDE.
     - **Box Plots**: Visualize outliers.
@@ -42,7 +42,7 @@ with st.sidebar.expander("ℹ️ User Guide"):
     - Use target variable for feature importance or regression.
     - Use lag column for time-series or spatial analyses.
     - Adjust visualization settings for better insights.
-    - Small numbers (< 1e-10) are shown in scientific notation in tables to ensure visibility.
+    - Small numbers (< 1e-10) are shown in scientific notation in tables to ensure visibility. Click on cells for full precision.
     - Download a detailed report of your analysis.
     """)
 
@@ -216,7 +216,7 @@ if st.button("🚀 Run Analysis", type="primary"):
 
         if selected_analysis_key == "summary":
             st.subheader("📜 Summary Statistics")
-            st.dataframe(analysis_result['summary'], use_container_width=True)
+            st.dataframe(analysis_result['styled_summary'], use_container_width=True)
             st.subheader("📜 Variance Comparison")
             st.plotly_chart(analysis_result['variance_plot'], use_container_width=True)
             if analysis_result['quality_checks']:
