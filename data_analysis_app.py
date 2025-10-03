@@ -10,7 +10,7 @@ from analysis_utils import (
     validate_data, generate_report
 )
 
-# === Streamlit UI Configuration ===
+# Streamlit UI Configuration
 st.set_page_config(page_title="Advanced Data Analysis App", layout="wide")
 
 st.title("📊 Advanced Data Analysis App")
@@ -32,12 +32,16 @@ with st.sidebar.expander("ℹ️ User Guide"):
     - **Variogram**: Spatial/temporal dependence analysis.
     - **Autocorrelation**: ACF for time-series data.
     - **Clustering**: K-means clustering for grouping similar data points.
-    - **Regression**: Basic linear regression modeling.
+    - **Regression**: Linear regression modeling.
+    - **Time-Series Decomposition**: Decompose into trend, seasonal, and residual components.
+    - **Anomaly Detection**: Identify anomalies using Isolation Forest.
+    - **Group Statistics**: Summary statistics by categorical group.
 
     **Tips**:
     - Select numeric columns for analysis.
-    - Use the target variable for feature importance or regression.
-    - Adjust visualization settings (e.g., colors, bins) for better insights.
+    - Use target variable for feature importance or regression.
+    - Use lag column for time-series or spatial analyses.
+    - Adjust visualization settings for better insights.
     - Download a detailed report of your analysis.
     """)
 
@@ -66,6 +70,7 @@ color_scale = st.sidebar.selectbox(
     help="Color scheme for visualizations"
 )
 n_clusters = st.sidebar.number_input("Number of Clusters (K-means)", min_value=2, value=3, help="Number of clusters for K-means")
+period = st.sidebar.number_input("Period for Time-Series Decomposition", min_value=2, value=12, help="Period for seasonal decomposition")
 
 # File Upload
 uploaded_files = st.file_uploader("📁 Upload Excel files", accept_multiple_files=True, type=['xlsx', 'xls'])
@@ -77,7 +82,7 @@ if st.button("Load Data"):
         df = load_and_preprocess_data(uploaded_files, n_rows)
         if not df.empty:
             st.session_state.df = df
-            st.success(f"✅ Loaded {len(df)} rows with {len(df.columns)} numeric columns")
+            st.success(f"✅ Loaded {len(df)} rows with {len(df.select_dtypes(include=[np.number]).columns)} numeric columns")
             with st.expander("👁️ Data Preview"):
                 st.dataframe(df.head(10), use_container_width=True)
         else:
@@ -90,30 +95,38 @@ if 'df' not in st.session_state:
     st.stop()
 
 df = st.session_state.df
-params = df.select_dtypes(include=[np.number]).columns.tolist()
+numeric_params = df.select_dtypes(include=[np.number]).columns.tolist()
+categorical_params = df.select_dtypes(include=['object', 'category']).columns.tolist()
 
 # Column Selection
-col1, col2 = st.columns(2)
+col1, col2, col3 = st.columns(3)
 with col1:
     analysis_columns = st.multiselect(
         "🔧 Select Columns to Analyze",
-        options=params,
-        default=params,
+        options=numeric_params,
+        default=numeric_params,
         help="Select numeric columns for analysis"
     )
 with col2:
     target_column = st.selectbox(
         "🎯 Target Variable (Optional)",
-        options=["None"] + params,
+        options=["None"] + numeric_params,
         index=0,
         help="Select a target for feature importance or regression"
     )
+with col3:
+    lag_column = st.selectbox(
+        "📍 Lag Column (Optional)",
+        options=["None"] + numeric_params,
+        index=0,
+        help="Select a column for lag (e.g., time or distance)"
+    )
 
-lag_column = st.selectbox(
-    "📍 Lag Column (Optional)",
-    options=["None"] + params,
+group_column = st.selectbox(
+    "📊 Group Column (Optional)",
+    options=["None"] + categorical_params,
     index=0,
-    help="Select a column for lag (e.g., time or distance)"
+    help="Select a categorical column for group-based statistics"
 )
 
 if not analysis_columns:
@@ -134,7 +147,10 @@ analysis_options = {
     "variogram": "Semivariogram (Spatial/Temporal Dependence)",
     "autocorrelation": "Autocorrelation Function (ACF)",
     "clustering": "K-means Clustering",
-    "regression": "Linear Regression"
+    "regression": "Linear Regression",
+    "timeseries_decomposition": "Time-Series Decomposition",
+    "anomaly_detection": "Anomaly Detection (Isolation Forest)",
+    "group_stats": "Descriptive Statistics by Group"
 }
 selected_analysis_key = st.radio(
     "📊 Select Analysis Type",
@@ -148,11 +164,14 @@ selected_analysis_key = st.radio(
 if selected_analysis_key == "feature_importance" and target_column == "None":
     st.error("❌ Select a target variable for feature importance analysis.")
     st.stop()
-if selected_analysis_key in ["variogram", "autocorrelation"] and lag_column == "None":
-    st.error("❌ Select a lag column for variogram or autocorrelation analysis.")
+if selected_analysis_key in ["variogram", "autocorrelation", "timeseries_decomposition"] and lag_column == "None":
+    st.error("❌ Select a lag column for time-series or spatial analysis.")
     st.stop()
 if selected_analysis_key == "regression" and target_column == "None":
     st.error("❌ Select a target variable for regression analysis.")
+    st.stop()
+if selected_analysis_key == "group_stats" and group_column == "None":
+    st.error("❌ Select a group column for group-based statistics.")
     st.stop()
 
 # Run Analysis
@@ -180,7 +199,9 @@ if st.button("🚀 Run Analysis", type="primary"):
             max_lag=max_lag if max_lag > 0 else None,
             n_lags=n_lags,
             color_scale=color_scale,
-            n_clusters=n_clusters
+            n_clusters=n_clusters,
+            group_column=group_column if group_column != "None" else None,
+            period=period
         )
 
         progress_bar.progress(0.8)
@@ -189,6 +210,9 @@ if st.button("🚀 Run Analysis", type="primary"):
         st.success(f"✅ Analysis completed: {analysis_options[selected_analysis_key]}")
 
         # Display Results
+        if 'small_value_warning' in analysis_result:
+            st.warning(f"⚠️ {analysis_result['small_value_warning']}")
+
         if selected_analysis_key == "summary":
             st.subheader("📜 Summary Statistics")
             st.dataframe(analysis_result['summary'], use_container_width=True)
@@ -269,8 +293,33 @@ if st.button("🚀 Run Analysis", type="primary"):
             st.dataframe(analysis_result['coefficients'], use_container_width=True)
             st.plotly_chart(analysis_result['regression_plot'], use_container_width=True)
 
+        elif selected_analysis_key == "timeseries_decomposition":
+            st.subheader("📜 Time-Series Decomposition")
+            for col, fig in analysis_result['decompositions'].items():
+                if fig:
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.warning(f"Insufficient data for decomposition of {col}.")
+
+        elif selected_analysis_key == "anomaly_detection":
+            st.subheader("📜 Anomaly Detection")
+            if not analysis_result['anomaly_df'].empty:
+                st.dataframe(analysis_result['anomaly_df'], use_container_width=True)
+                st.plotly_chart(analysis_result['anomaly_plot'], use_container_width=True)
+            else:
+                st.info("No anomalies detected.")
+
+        elif selected_analysis_key == "group_stats":
+            st.subheader("📜 Group Statistics")
+            st.dataframe(analysis_result['group_stats'], use_container_width=True)
+            if 'group_plot' in analysis_result:
+                st.plotly_chart(analysis_result['group_plot'], use_container_width=True)
+
         # Generate and Offer Report Download
-        report_text = generate_report(analysis_result, selected_analysis_key, analysis_columns, target_column, lag_column, analysis_options)
+        report_text = generate_report(
+            analysis_result, selected_analysis_key, analysis_columns,
+            target_column, lag_column, group_column, analysis_options
+        )
         st.download_button(
             "💾 Download Report",
             report_text,
