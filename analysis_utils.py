@@ -1,4 +1,4 @@
-import streamlit as st  # Added import for Streamlit
+import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
@@ -9,6 +9,8 @@ from sklearn.decomposition import IncrementalPCA
 from sklearn.preprocessing import StandardScaler
 from sklearn.cluster import KMeans
 from sklearn.linear_model import LinearRegression
+from sklearn.ensemble import IsolationForest
+import statsmodels.tsa.seasonal as smt
 import statsmodels.tsa.stattools as ts
 import io
 
@@ -37,32 +39,42 @@ def validate_data(df: pd.DataFrame, selected_columns: List[str], min_rows: int) 
 
 # Data Loading
 def load_and_preprocess_data(uploaded_files, n_rows=None) -> pd.DataFrame:
-    """Load numeric Excel data or generate sample."""
+    """Load numeric Excel data or generate sample, preserving small values."""
     if not uploaded_files:
         # Generate sample data
         rng = np.random.default_rng(42)
         df = pd.DataFrame({
             'Feature1': rng.normal(1.2, 0.05, 100),
             'Feature2': rng.normal(500, 50, 100),
-            'Feature3': rng.normal(30, 2, 100),
+            'Feature3': rng.normal(30, 2, 100) * 1e-16,  # Include small values
             'Time': np.arange(100),
-            'Target': 2 * rng.normal(1.2, 0.05, 100) + np.sin(rng.normal(30, 2, 100))
+            'Target': 2 * rng.normal(1.2, 0.05, 100) + np.sin(rng.normal(30, 2, 100)),
+            'Category': rng.choice(['A', 'B', 'C'], 100)  # For group-based analysis
         })
         return df
 
     dfs = []
     for uploaded_file in uploaded_files:
         uploaded_file.seek(0)
-        df_temp = pd.read_excel(io.BytesIO(uploaded_file.read()), engine='openpyxl')
+        # Use float64 to preserve small numbers
+        df_temp = pd.read_excel(io.BytesIO(uploaded_file.read()), engine='openpyxl', dtype_backend='numpy_nullable')
         numeric_cols = df_temp.select_dtypes(include=[np.number]).columns.tolist()
+        # Preserve categorical columns for group-based analysis
+        categorical_cols = df_temp.select_dtypes(include=['object', 'category']).columns.tolist()
         if numeric_cols:
-            df_temp = df_temp[numeric_cols].fillna(df_temp[numeric_cols].median())
+            df_temp = df_temp[numeric_cols + categorical_cols].copy()
+            # Impute missing numeric values with median
+            df_temp[numeric_cols] = df_temp[numeric_cols].fillna(df_temp[numeric_cols].median())
             if n_rows:
                 df_temp = df_temp.sample(n=min(n_rows, len(df_temp)), random_state=42)
             dfs.append(df_temp)
 
     if dfs:
-        return pd.concat(dfs, ignore_index=True)
+        df = pd.concat(dfs, ignore_index=True)
+        # Convert numeric columns to float64 to avoid precision loss
+        for col in numeric_cols:
+            df[col] = df[col].astype(np.float64)
+        return df
     raise DataAnalysisError("No numeric data found in uploaded files.")
 
 # Main Analysis Function
@@ -79,13 +91,22 @@ def analyze_data(
     max_lag: float = None,
     n_lags: int = 10,
     color_scale: str = "RdBu_r",
-    n_clusters: int = 3
+    n_clusters: int = 3,
+    group_column: str = None,
+    period: int = None
 ) -> Dict[str, Any]:
-    """Perform specified data analysis."""
+    """Perform specified data analysis, handling small values."""
     results = {}
 
+    # Check for small values
+    small_value_threshold = 1e-15
+    small_value_cols = [col for col in selected_columns if df[col].abs().max() < small_value_threshold and df[col].abs().max() > 0]
+    if small_value_cols:
+        results['small_value_warning'] = f"Columns with very small values (< {small_value_threshold}): {', '.join(small_value_cols)}"
+
     if analysis_type == "summary":
-        # Summary statistics
+        # Summary statistics with high precision
+        pd.options.display.float_format = '{:.16e}'.format  # Preserve small numbers in display
         summary = df[selected_columns].describe().T
         summary['range'] = summary['max'] - summary['min']
         summary['variance'] = df[selected_columns].var()
@@ -105,13 +126,13 @@ def analyze_data(
             color_discrete_sequence=[px.colors.sequential.__dict__[color_scale][0]]
         )
 
-        # Data quality checks
+        # Data quality checks, adjusted for small values
         quality_checks = []
         for col in selected_columns:
             if summary.loc[col, 'missing_%'] > 30:
                 quality_checks.append(f"{col}: High missing values ({summary.loc[col, 'missing_%']:.1f}%)")
-            if summary.loc[col, 'variance'] < 1e-6:
-                quality_checks.append(f"{col}: Low variance ({summary.loc[col, 'variance']:.2e})")
+            if summary.loc[col, 'variance'] < 1e-30:  # Lower threshold for small values
+                quality_checks.append(f"{col}: Extremely low variance ({summary.loc[col, 'variance']:.2e})")
             if summary.loc[col, 'skewness'] > 1 or summary.loc[col, 'skewness'] < -1:
                 quality_checks.append(f"{col}: High skewness ({summary.loc[col, 'skewness']:.2f})")
         results['quality_checks'] = quality_checks
@@ -253,7 +274,7 @@ def analyze_data(
         results['normality'] = pd.DataFrame(normality_results)
 
     elif analysis_type == "pca":
-        # PCA with IncrementalPCA for large datasets
+        # PCA with IncrementalPCA
         scaler = StandardScaler()
         X_scaled = scaler.fit_transform(df[selected_columns].dropna())
         pca = IncrementalPCA(n_components=min(len(selected_columns), len(X_scaled)))
@@ -410,6 +431,75 @@ def analyze_data(
                 go.Scatter(x=X.iloc[:, 0], y=y_pred, mode='lines', name='Fit', line=dict(color='red'))
             )
 
+    elif analysis_type == "timeseries_decomposition" and lag_column:
+        # Time-series decomposition
+        decompositions = {}
+        for col in selected_columns:
+            if col != lag_column:
+                data = df[[col, lag_column]].dropna().sort_values(by=lag_column)[col]
+                if len(data) >= period * 2:  # Need enough data for decomposition
+                    decomposition = smt.DecomposeResult(
+                        observed=data,
+                        trend=smt.STL(data, period=period).fit().trend,
+                        seasonal=smt.STL(data, period=period).fit().seasonal,
+                        resid=smt.STL(data, period=period).fit().resid
+                    )
+                    fig = go.Figure()
+                    fig.add_trace(go.Scatter(x=df[lag_column], y=decomposition.observed, mode='lines', name='Observed'))
+                    fig.add_trace(go.Scatter(x=df[lag_column], y=decomposition.trend, mode='lines', name='Trend', line=dict(color='red')))
+                    fig.add_trace(go.Scatter(x=df[lag_column], y=decomposition.seasonal, mode='lines', name='Seasonal', line=dict(color='green')))
+                    fig.add_trace(go.Scatter(x=df[lag_column], y=decomposition.resid, mode='lines', name='Residual', line=dict(color='purple')))
+                    fig.update_layout(title=f"Time-Series Decomposition of {col}", xaxis_title=lag_column, yaxis_title=col)
+                    decompositions[col] = fig
+                else:
+                    decompositions[col] = None
+        results['decompositions'] = decompositions
+
+    elif analysis_type == "anomaly_detection":
+        # Anomaly detection with Isolation Forest
+        scaler = StandardScaler()
+        X_scaled = scaler.fit_transform(df[selected_columns].dropna())
+        iso_forest = IsolationForest(contamination=0.1, random_state=42)
+        anomalies = iso_forest.fit_predict(X_scaled)
+        anomaly_df = df[selected_columns].dropna().copy()
+        anomaly_df['Anomaly'] = anomalies == -1  # -1 indicates anomaly
+        results['anomaly_df'] = anomaly_df[anomaly_df['Anomaly']][selected_columns]
+        
+        # Anomaly scatter plot (if possible)
+        if len(selected_columns) >= 2:
+            results['anomaly_plot'] = px.scatter(
+                anomaly_df,
+                x=selected_columns[0],
+                y=selected_columns[1],
+                color='Anomaly',
+                title="Anomaly Detection (Isolation Forest)",
+                color_discrete_map={True: 'red', False: 'blue'}
+            )
+        else:
+            results['anomaly_plot'] = px.scatter(
+                anomaly_df,
+                x=selected_columns[0],
+                y=anomaly_df.index,
+                color='Anomaly',
+                title="Anomaly Detection (Single Feature)",
+                color_discrete_map={True: 'red', False: 'blue'}
+            )
+
+    elif analysis_type == "group_stats" and group_column:
+        # Descriptive statistics by group
+        group_stats = df.groupby(group_column)[selected_columns].agg(['mean', 'std', 'min', 'max']).reset_index()
+        results['group_stats'] = group_stats
+        
+        # Bar plot for group means
+        if len(selected_columns) >= 1:
+            results['group_plot'] = px.bar(
+                group_stats,
+                x=group_column,
+                y=(selected_columns[0], 'mean'),
+                title=f"Mean of {selected_columns[0]} by {group_column}",
+                color_discrete_sequence=[px.colors.sequential.__dict__[color_scale][0]]
+            )
+
     return results
 
 # Report Generation
@@ -419,6 +509,7 @@ def generate_report(
     analysis_columns: List[str],
     target_column: str,
     lag_column: str,
+    group_column: str,
     analysis_options: Dict[str, str]
 ) -> str:
     """Generate a text report of the analysis results."""
@@ -429,9 +520,13 @@ def generate_report(
 **Columns**: {', '.join(analysis_columns)}
 **Target (if applicable)**: {target_column if target_column != "None" else "N/A"}
 **Lag Column (if applicable)**: {lag_column if lag_column != "None" else "N/A"}
+**Group Column (if applicable)**: {group_column if group_column != "None" else "N/A"}
 
 **Results**:
 """
+    if 'small_value_warning' in analysis_result:
+        report_text += f"\n**Warning**: {analysis_result['small_value_warning']}\n"
+    
     if analysis_type == "summary":
         report_text += analysis_result['summary'].to_string()
         if analysis_result['quality_checks']:
@@ -457,7 +552,11 @@ def generate_report(
         report_text += analysis_result['cluster_summary'].to_string()
     elif analysis_type == "regression":
         report_text += f"R² Score: {analysis_result['r2_score']:.3f}\nCoefficients:\n{analysis_result['coefficients'].to_string()}"
-    else:
-        report_text += str(analysis_result)
+    elif analysis_type == "timeseries_decomposition":
+        report_text += f"Decompositions computed for {', '.join([col for col, fig in analysis_result['decompositions'].items() if fig])}"
+    elif analysis_type == "anomaly_detection":
+        report_text += analysis_result['anomaly_df'].to_string()
+    elif analysis_type == "group_stats":
+        report_text += analysis_result['group_stats'].to_string()
 
     return report_text
