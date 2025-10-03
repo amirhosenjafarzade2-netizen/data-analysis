@@ -99,7 +99,7 @@ def analyze_data(
     results = {}
 
     # Check for small values
-    small_value_threshold = 1e-10  # Adjusted threshold for display
+    small_value_threshold = 1e-10  # Threshold for scientific notation
     small_value_cols = [col for col in selected_columns if df[col].abs().max() < small_value_threshold and df[col].abs().max() > 0]
     if small_value_cols:
         results['small_value_warning'] = f"Columns with very small values (< {small_value_threshold}): {', '.join(small_value_cols)}"
@@ -114,7 +114,18 @@ def analyze_data(
         summary['missing_%'] = df[selected_columns].isnull().mean() * 100
         summary['skewness'] = df[selected_columns].skew()
         summary['kurtosis'] = df[selected_columns].kurtosis()
-        results['summary'] = summary
+
+        # Pre-format small values as strings in scientific notation
+        formatted_summary = summary.copy()
+        for col in summary.columns:
+            if summary[col].abs().max() < small_value_threshold and not col.startswith('missing_%'):
+                formatted_summary[col] = summary[col].apply(lambda x: f"{x:.4e}" if pd.notnull(x) else "N/A")
+            else:
+                formatted_summary[col] = summary[col].apply(lambda x: f"{x:.4f}" if pd.notnull(x) else "N/A")
+        results['summary'] = formatted_summary
+
+        # Store raw summary for calculations if needed
+        results['raw_summary'] = summary
 
         # Variance plot
         results['variance_plot'] = px.bar(
@@ -527,15 +538,8 @@ def generate_report(
         report_text += f"\n**Warning**: {analysis_result['small_value_warning']}\n"
     
     if analysis_type == "summary":
-        # Format summary for report with scientific notation for small values
-        summary = analysis_result['summary']
-        formatted_summary = summary.copy()
-        for col in summary.columns:
-            if summary[col].abs().max() < 1e-10:
-                formatted_summary[col] = summary[col].map('{:.4e}'.format)
-            else:
-                formatted_summary[col] = summary[col].map('{:.4f}'.format)
-        report_text += formatted_summary.to_string()
+        # Use pre-formatted summary for report
+        report_text += analysis_result['summary'].to_string()
         if analysis_result['quality_checks']:
             report_text += "\n\n**Data Quality Issues**:\n" + "\n".join(analysis_result['quality_checks'])
     elif analysis_type == "correlation":
