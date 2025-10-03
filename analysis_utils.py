@@ -99,14 +99,13 @@ def analyze_data(
     results = {}
 
     # Check for small values
-    small_value_threshold = 1e-15
+    small_value_threshold = 1e-10  # Adjusted threshold for display
     small_value_cols = [col for col in selected_columns if df[col].abs().max() < small_value_threshold and df[col].abs().max() > 0]
     if small_value_cols:
         results['small_value_warning'] = f"Columns with very small values (< {small_value_threshold}): {', '.join(small_value_cols)}"
 
     if analysis_type == "summary":
         # Summary statistics with high precision
-        pd.options.display.float_format = '{:.16e}'.format  # Preserve small numbers in display
         summary = df[selected_columns].describe().T
         summary['range'] = summary['max'] - summary['min']
         summary['variance'] = df[selected_columns].var()
@@ -528,7 +527,15 @@ def generate_report(
         report_text += f"\n**Warning**: {analysis_result['small_value_warning']}\n"
     
     if analysis_type == "summary":
-        report_text += analysis_result['summary'].to_string()
+        # Format summary for report with scientific notation for small values
+        summary = analysis_result['summary']
+        formatted_summary = summary.copy()
+        for col in summary.columns:
+            if summary[col].abs().max() < 1e-10:
+                formatted_summary[col] = summary[col].map('{:.4e}'.format)
+            else:
+                formatted_summary[col] = summary[col].map('{:.4f}'.format)
+        report_text += formatted_summary.to_string()
         if analysis_result['quality_checks']:
             report_text += "\n\n**Data Quality Issues**:\n" + "\n".join(analysis_result['quality_checks'])
     elif analysis_type == "correlation":
