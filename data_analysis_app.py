@@ -1,11 +1,15 @@
-import streamlit as st
+\import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 import io
-import ydata_profiling  # For Automated EDA
 from typing import List, Dict, Any
+try:
+    import ydata_profiling  # For Automated EDA
+except ImportError:
+    ydata_profiling = None
+    st.warning("⚠️ ydata-profiling not installed. Automated EDA report will be disabled. Install with `pip install ydata-profiling`.")
 from analysis_utils import (
     DataAnalysisError, analyze_data, load_and_preprocess_data,
     validate_data, generate_report, format_dataframe_for_display,
@@ -40,7 +44,7 @@ with st.sidebar.expander("ℹ️ User Guide"):
     - **Time-Series Decomposition**: Decompose into trend, seasonal, and residual components.
     - **Anomaly Detection**: Identify anomalies using Isolation Forest.
     - **Group Statistics**: Summary statistics by categorical group.
-    - **Automated EDA**: Comprehensive report with visuals (like pandas-profiling).
+    - **Automated EDA**: Comprehensive report with visuals (requires ydata-profiling).
     - **Data Cleaning**: Suggestions for missing values, outliers, and encoding.
     - **ML Pipeline**: AutoML-like model selection and evaluation.
     - **Forecasting**: ARIMA-based time-series forecasting.
@@ -223,6 +227,9 @@ if selected_analysis_key == "ml_pipeline" and target_column == "None":
 if selected_analysis_key == "group_stats" and group_column == "None":
     st.error("❌ Select a group column for group-based statistics.")
     st.stop()
+if selected_analysis_key == "eda_report" and ydata_profiling is None:
+    st.error("❌ Automated EDA report requires ydata-profiling. Install it with `pip install ydata-profiling`.")
+    st.stop()
 
 # Run Analysis
 if st.button("🚀 Run Analysis", type="primary"):
@@ -383,8 +390,11 @@ if st.button("🚀 Run Analysis", type="primary"):
         elif selected_analysis_key == "forecasting":
             st.subheader("📜 ARIMA Forecasting")
             for col, forecast in analysis_result['forecasts'].items():
-                st.plotly_chart(forecast['plot'], use_container_width=True)
-                st.dataframe(format_dataframe_for_display(forecast['forecast_df']), use_container_width=True)
+                if forecast['plot']:
+                    st.plotly_chart(forecast['plot'], use_container_width=True)
+                    st.dataframe(format_dataframe_for_display(forecast['forecast_df']), use_container_width=True)
+                else:
+                    st.warning(f"Insufficient data for forecasting {col}.")
 
         # Generate and Offer Report Download
         report_text = generate_report(
@@ -437,12 +447,15 @@ def generate_dashboard(df: pd.DataFrame, analysis_result: Dict[str, Any], analys
     """.format(analysis_options[analysis_type], ", ".join(columns))
 
     if analysis_type == "summary":
-        html_content += f"<h3>Summary Statistics</h3><pre>{analysis_result['summary'].to_html()}</pre>"
+        html_content += f"<h3>Summary Statistics</h3><pre>{format_dataframe_for_display(analysis_result['summary']).to_html()}</pre>"
         html_content += f'<div class="plot-container" id="variance_plot"></div><script>{analysis_result["variance_plot"].to_json()}</script>'
     elif analysis_type == "correlation":
         html_content += f'<div class="plot-container" id="corr_heatmap"></div><script>{analysis_result["corr_heatmap"].to_json()}</script>'
         if 'corr_scatter' in analysis_result:
             html_content += f'<div class="plot-container" id="corr_scatter"></div><script>{analysis_result["corr_scatter"].to_json()}</script>'
+    elif analysis_type == "distribution":
+        for col, fig in analysis_result['histograms'].items():
+            html_content += f'<div class="plot-container" id="hist_{col}"></div><script>{fig.to_json()}</script>'
     # Add similar blocks for other analysis types
 
     html_content += "</body></html>"
